@@ -1,4 +1,6 @@
-import { Client, GatewayIntentBits } from "discord.js";
+import fs from "fs";
+import path from "path";
+import { Client, GatewayIntentBits, Collection } from "discord.js";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -16,9 +18,9 @@ client.once("ready", () => {
 client.on("messageCreate", (message) => {
   if (message.author.bot) return;
 
-  if (message.content === "!ping") {
-    message.reply("🏓 Pong!");
-  }
+  if (message.content === "leon") {
+    message.reply("posang bading 😾");
+  } 
 });
 
 client.login(process.env.DISCORD_TOKEN);
