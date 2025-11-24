@@ -10,168 +10,156 @@ import {
 import { execa } from "execa";
 import path from "path";
 import fs from "fs";
-import fetch from "node-fetch";
+
+import { attachVoiceReconnection } from "../index.js";
 
 const queueMap = new Map();
 
-/* ---------------------------------------------------------
-   YOUTUBE SEARCH (YouTube Data API)
---------------------------------------------------------- */
-async function youtubeSearch(query) {
-  const apiKey = process.env.YT_API_KEY;
-  if (!apiKey) throw new Error("Missing YT_API_KEY env variable.");
+/** Locate yt-dlp binary inside node_modules or global path */
+function findYtdlpBinary() {
+  const candidatePaths = [
+    path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+    path.join(process.cwd(), "node_modules", ".bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+    "yt-dlp"
+  ];
 
-  const url =
-    "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&q=" +
-    encodeURIComponent(query) +
-    "&key=" +
-    apiKey;
-
-  const res = await fetch(url);
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error("YouTube API error: " + txt);
-  }
-
-  const data = await res.json();
-  if (!data.items || !data.items.length) return null;
-
-  const vid = data.items[0].id.videoId;
-  const title = data.items[0].snippet.title;
-
-  return { title, url: `https://www.youtube.com/watch?v=${vid}` };
+  return candidatePaths.find((p) => {
+    try {
+      if (p === "yt-dlp") return true;
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  });
 }
 
-/* ---------------------------------------------------------
-   MAIN HANDLER
---------------------------------------------------------- */
 export async function handleMusicCommand(command, msg, args) {
-  if (!msg.guild) return;
-
   const guildId = msg.guild.id;
 
-  if (["play", "stop", "queue"].includes(command) && !msg.member.voice?.channel) {
-    await msg.reply("You must be in a voice channel!");
+  if (!msg.member.voice.channel) {
+    await msg.reply("❌ You must join a voice channel first.");
     return;
   }
 
   let queue = queueMap.get(guildId) || [];
   let connection = getVoiceConnection(guildId);
 
-  /* PLAY */
   if (command === "play") {
-    const query = args.join(" ").trim();
-    if (!query) return msg.reply("❌ Provide a search term or URL.");
+    const query = args.join(" ");
+    await msg.reply(`🔍 Searching: **${query}**`);
 
-    await msg.reply(`🔍 Searching: ${query}`);
-
-    let song;
-
-    try {
-      const isUrl = /^https?:\/\//i.test(query);
-      if (isUrl) {
-        const urlObj = new URL(query);
-        const v = urlObj.searchParams.get("v");
-        song = v
-          ? { title: "YouTube Video", url: `https://www.youtube.com/watch?v=${v}` }
-          : { title: query, url: query };
-      } else {
-        song = await youtubeSearch(query);
-      }
-    } catch (err) {
-      console.error(err);
-      return msg.reply("❌ Error searching YouTube.");
+    const ytdlpPath = findYtdlpBinary();
+    if (!ytdlpPath) {
+      await msg.reply("❌ yt-dlp executable not found (yt-dlp-exec missing?).");
+      return;
     }
 
-    if (!song) return msg.reply("❌ No results found.");
+    const cookiesPath = process.env.YT_COOKIES_PATH;
+    const searchArgs = [
+      `ytsearch1:${query}`,
+      "--dump-single-json",
+      "--no-check-certificate",
+      "--extractor-args",
+      "youtube:player_client=default"
+    ];
+
+    if (cookiesPath && fs.existsSync(cookiesPath)) {
+      searchArgs.push("--cookies", cookiesPath);
+    }
+
+    let info;
+    try {
+      const { stdout } = await execa(ytdlpPath, searchArgs);
+      info = JSON.parse(stdout);
+    } catch (err) {
+      console.error("YTDLP SEARCH ERROR:", err?.stderr || err);
+      await msg.reply("❌ yt-dlp search failed or returned no results.");
+      return;
+    }
+
+    const entry = info?.entries?.[0] || info;
+    const url = entry?.webpage_url || entry?.url;
+
+    if (!entry || !url) {
+      await msg.reply("❌ No results found.");
+      return;
+    }
+
+    const song = {
+      title: entry.title || "Unknown Title",
+      url
+    };
 
     queue.push(song);
     queueMap.set(guildId, queue);
 
-    await msg.reply(`✅ Added to queue: **${song.title}**`);
+    await msg.reply(`🎶 Added to queue: **${song.title}**`);
 
     if (!connection) {
       connection = joinVoiceChannel({
+        guildId: guildId,
         channelId: msg.member.voice.channel.id,
-        guildId,
-        adapterCreator: msg.guild.voiceAdapterCreator,
+        adapterCreator: msg.guild.voiceAdapterCreator
       });
+
+      // *** ENABLE AUTO-RECONNECT ***
+      attachVoiceReconnection(connection);
     }
 
     if (queue.length === 1) playNext(msg, connection, queue);
-    return;
   }
 
-  /* STOP */
   if (command === "stop") {
-    connection?.destroy();
+    if (connection) connection.destroy();
     queueMap.set(guildId, []);
-    return msg.reply("⏹️ Stopped.");
+    await msg.reply("⏹️ Stopped and cleared queue.");
   }
 
-  /* QUEUE */
   if (command === "queue") {
-    if (!queue.length) return msg.reply("Queue is empty!");
+    if (!queue.length) {
+      await msg.reply("📭 Queue is empty.");
+      return;
+    }
+
     const list = queue.map((s, i) => `${i + 1}. ${s.title}`).join("\n");
-    return msg.reply("**Queue:**\n" + list);
+    await msg.reply(`📜 **Current Queue:**\n${list}`);
   }
 }
 
-/* ---------------------------------------------------------
-   PLAY NEXT SONG
---------------------------------------------------------- */
 function playNext(msg, connection, queue) {
   if (!queue.length) return;
+
   const song = queue[0];
+  msg.channel.send(`🎵 Now Playing: **${song.title}**`);
 
-  msg.channel.send(`🎵 Now playing: **${song.title}**`);
-
-  /* ---- Load Cookies ---- */
-  const cookieEnv = process.env.YT_COOKIES_PATH || "/app/cookies.txt";
-  const hasCookies = fs.existsSync(cookieEnv);
-
-  const cookieArgs = hasCookies ? ["--cookies", cookieEnv] : [];
-
-  if (hasCookies) {
-    console.log("Using cookies.txt:", cookieEnv);
-  } else {
-    console.log("No cookies file detected.");
-  }
-
-  /* ---- Find yt-dlp ---- */
-  const possible = [
-    path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
-    path.join(process.cwd(), "node_modules", ".bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
-    "yt-dlp",
-  ];
-
-  const ytDlpPath = possible.find((p) => p === "yt-dlp" || fs.existsSync(p));
-  if (!ytDlpPath) {
-    msg.channel.send("❌ yt-dlp not found.");
+  const ytdlpPath = findYtdlpBinary();
+  if (!ytdlpPath) {
+    msg.channel.send("❌ yt-dlp missing — cannot stream.");
     connection.destroy();
     return;
   }
 
-  /* ---- Spawn yt-dlp ---- */
+  const cookiesPath = process.env.YT_COOKIES_PATH;
+
+  const args = [
+    "-f",
+    "bestaudio",
+    "-o",
+    "-",
+    "--extractor-args",
+    "youtube:player_client=default",
+    song.url
+  ];
+
+  if (cookiesPath && fs.existsSync(cookiesPath)) {
+    args.unshift("--cookies", cookiesPath);
+  }
+
   let proc;
   try {
-    proc = execa(
-      ytDlpPath,
-      [
-        "-f",
-        "bestaudio",
-        "-o",
-        "-",
-        "--no-warnings",
-        "--extractor-args",
-        "youtube:player_client=default",
-        ...cookieArgs,
-        song.url,
-      ],
-      { stdout: "pipe" }
-    );
+    proc = execa(ytdlpPath, args, { stdout: "pipe" });
   } catch (err) {
-    console.error("yt-dlp spawn error:", err);
+    console.error("yt-dlp launch failed:", err);
     queue.shift();
     queueMap.set(msg.guild.id, queue);
     if (queue.length) playNext(msg, connection, queue);
@@ -179,8 +167,10 @@ function playNext(msg, connection, queue) {
     return;
   }
 
-  /* ---- Create audio resource ---- */
-  const resource = createAudioResource(proc.stdout, { inputType: StreamType.Arbitrary });
+  const resource = createAudioResource(proc.stdout, {
+    inputType: StreamType.Arbitrary
+  });
+
   const player = createAudioPlayer();
 
   player.play(resource);
@@ -190,21 +180,29 @@ function playNext(msg, connection, queue) {
     try {
       proc.kill();
     } catch {}
+
     queue.shift();
     queueMap.set(msg.guild.id, queue);
-    queue.length ? playNext(msg, connection, queue) : connection.destroy();
+
+    if (queue.length) playNext(msg, connection, queue);
+    else connection.destroy();
   });
 
   player.on("error", (err) => {
-    console.error("Audio error:", err);
+    console.error("Audio player error:", err);
     try {
       proc.kill();
     } catch {}
+
+    queue.shift();
+    queueMap.set(msg.guild.id, queue);
+    if (queue.length) playNext(msg, connection, queue);
+    else connection.destroy();
   });
 
   proc.catch?.((err) => {
-    console.error("yt-dlp failed:", err);
-    msg.channel.send("❌ yt-dlp failed. Skipping.");
+    console.error("yt-dlp stream error:", err);
+    msg.channel.send("⚠️ Error streaming audio. Skipping…");
     try {
       player.stop();
     } catch {}

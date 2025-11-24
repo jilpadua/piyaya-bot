@@ -4,43 +4,66 @@ import fs from "fs";
 import path from "path";
 
 const app = express();
-const upload = multer({ dest: "uploads/" });
 
-const COOKIES_PATH = process.env.YT_COOKIES_PATH || "/app/cookies.txt";
+const UPLOAD_DIR = process.env.UPLOAD_DIR || "/app/uploads";
+const COOKIES_PATH = process.env.YT_COOKIES_PATH || "/app/cookies/cookies.txt";
 
-// Upload form
+// ensure dir exists
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  fs.mkdirSync(path.dirname(COOKIES_PATH), { recursive: true });
+} catch (err) {
+  // ignore, mkdir may fail under non-root - but we created dirs in Dockerfile
+}
+
+const storage = multer.diskStorage({
+  destination: function (_, __, cb) {
+    cb(null, UPLOAD_DIR);
+  },
+  filename: function (_, file, cb) {
+    // Save to a safe name, we'll move it to COOKIES_PATH after
+    const filename = `cookies-${Date.now()}.txt`;
+    cb(null, filename);
+  }
+});
+
+const upload = multer({ storage });
+
+app.get("/", (req, res) => {
+  res.send("Cookie uploader running. POST a file to /upload (form field 'cookies').");
+});
+
+// Serve upload form (GET /upload)
 app.get("/upload", (req, res) => {
-    res.send(`
-        <h2>Upload cookies.txt</h2>
-        <form enctype="multipart/form-data" method="POST" action="/upload">
-            <input type="file" name="cookies" />
-            <button type="submit">Upload</button>
+  res.send(`
+    <html>
+      <body style="font-family: sans-serif; padding: 40px;">
+        <h2>Upload YouTube Cookies File</h2>
+        <form action="/upload" method="post" enctype="multipart/form-data">
+          <input type="file" name="cookies" accept=".txt" />
+          <button type="submit">Upload</button>
         </form>
-    `);
+      </body>
+    </html>
+  `);
 });
 
-// Handle upload
 app.post("/upload", upload.single("cookies"), (req, res) => {
-    if (!req.file) {
-        return res.status(400).send("No file uploaded.");
+  if (!req.file) return res.status(400).send("No file uploaded. Use form field name 'cookies'.");
+  const uploaded = req.file.path;
+  // move to configured cookie path (overwrite)
+  fs.copyFile(uploaded, COOKIES_PATH, (err) => {
+    if (err) {
+      console.error("Failed to save cookies:", err);
+      return res.status(500).send("Failed to save cookies.");
     }
-
-    const tempPath = req.file.path;
-
-    try {
-        fs.renameSync(tempPath, COOKIES_PATH);
-        res.send("✅ cookies.txt uploaded successfully!");
-    } catch (err) {
-        console.error(err);
-        res.status(500).send("Failed to save cookies.");
-    }
+    // optionally remove uploaded file (keep it or remove)
+    try { fs.unlinkSync(uploaded); } catch {}
+    return res.send({ ok: true, savedTo: COOKIES_PATH });
+  });
 });
 
-// Healthcheck
-app.get("/", (req, res) => res.send("Cookie uploader is running."));
-
-// Required for Railway
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log("Uploader running on port", PORT);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Uploader listening on ${port}`);
 });

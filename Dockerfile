@@ -1,47 +1,54 @@
-##############################
+##########################################
 # 1. Builder Stage
-##############################
+##########################################
 FROM node:22-slim AS builder
 
 WORKDIR /app
 
-# Install build tools required for some NPM modules
+# Install python & build tools for certain npm packages
 RUN apt-get update && \
-    apt-get install -y python3 ffmpeg build-essential && \
+    apt-get install -y --no-install-recommends python3 build-essential && \
     ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy package files first
+# Copy package files
 COPY package*.json ./
 
-# Install deps (dev + prod)
-ENV DISABLE_DAVE=1
-RUN npm install @snazzah/davey && npm ci
+# Install full dependencies
+RUN npm ci
 
-# Copy source
+# Copy entire project
 COPY . .
 
-##############################
+
+##########################################
 # 2. Production Stage
-##############################
+##########################################
 FROM node:22-slim AS production
 
 WORKDIR /app
 
-# Install only tools needed at runtime
+# Install minimal runtime dependencies
 RUN apt-get update && \
-    apt-get install -y ffmpeg python3 && \
+    apt-get install -y --no-install-recommends ffmpeg libsodium23 python3 ca-certificates && \
     ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
+# Create a non-root user (auto UID)
 RUN useradd -m bot
+
+# Create required writable directories
+RUN mkdir -p /app/uploads /app/tmp /app/cookies && \
+    chown -R bot:bot /app
+
+# Switch to non-root user
 USER bot
 
-# Copy built app
-COPY --from=builder /app /app
+# Copy node_modules and source from builder
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app ./
 
+# Production env
 ENV NODE_ENV=production
-ENV DISABLE_DAVE=1
 
 CMD ["npm", "start"]

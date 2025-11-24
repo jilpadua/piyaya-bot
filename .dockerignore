@@ -1,4 +1,8 @@
 node_modules
 npm-debug.log
-.DS_Store
+Dockerfile
+Dockerfile.railway
+.git
 .env
+upload/
+cookies/

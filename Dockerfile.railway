@@ -1,0 +1,31 @@
+# Railway-friendly Dockerfile using Railway’s Node 22 base image
+FROM ghcr.io/railwayapp/node:22
+
+WORKDIR /app
+
+# Install required runtime packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg python3 ca-certificates libsodium23 && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy package files
+COPY package*.json ./
+
+# Install production dependencies
+RUN npm ci --omit=dev
+
+# Copy source code
+COPY . .
+
+# Ensure Railway has fully writable dirs for uploads & cookies
+RUN mkdir -p /app/uploads /app/cookies /app/tmp && \
+    chmod -R 777 /app/uploads /app/cookies /app/tmp
+
+EXPOSE 3000
+
+ENV NODE_ENV=production \
+    YT_COOKIES_PATH=/app/cookies/cookies.txt \
+    UPLOAD_DIR=/app/uploads
+
+CMD ["npm", "start"]
