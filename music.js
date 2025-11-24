@@ -1,56 +1,79 @@
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, getVoiceConnection, StreamType } from '@discordjs/voice';
+import {
+    joinVoiceChannel,
+    createAudioPlayer,
+    createAudioResource,
+    AudioPlayerStatus,
+    getVoiceConnection,
+    StreamType
+} from '@discordjs/voice';
+
 import ytdlp from 'yt-dlp-exec';
 import { execa } from 'execa';
 import path from 'path';
 import fs from 'fs';
+
 const queueMap = new Map();
+const playerMap = new Map();
 
 export async function handleMusicCommand(command, msg, args) {
     const guildId = msg.guild.id;
+
     if (!msg.member.voice.channel) {
         msg.reply('You must be in a voice channel!');
         return;
     }
-    let queue = queueMap.get(msg.guild.id) || [];
-    let connection = getVoiceConnection(msg.guild.id);
+
+    let queue = queueMap.get(guildId) || [];
+    let connection = getVoiceConnection(guildId);
 
     if (command === 'play') {
         const query = args.join(' ');
         msg.reply(`🔍 Searching for: ${query}`);
+
         let info;
         try {
-            // Use ytsearch1: to get the top result only
-            info = await ytdlp(`ytsearch1:${query}`, { dumpSingleJson: true, noCheckCertificate: true });
-        } catch (err) {
+            info = await ytdlp(`ytsearch1:${query}`, {
+                dumpSingleJson: true,
+                noCheckCertificate: true
+            });
+        } catch {
             msg.reply('No results found!');
             return;
         }
-        let entry = info.entries && info.entries[0];
-        // Use webpage_url if url is missing
-        const url = entry?.url || entry?.webpage_url;
-        if (!entry || !url) {
+
+        const entry = info.entries?.[0];
+        if (!entry) {
             msg.reply('No results found!');
             return;
         }
+
+        const url = entry.url || entry.webpage_url;
+        if (!url) {
+            msg.reply('Invalid video.');
+            return;
+        }
+
         const song = { title: entry.title, url };
+
         queue.push(song);
-        queueMap.set(msg.guild.id, queue);
+        queueMap.set(guildId, queue);
+
         msg.reply(`✅ Added to queue: **${song.title}**`);
+
         if (!connection) {
             connection = joinVoiceChannel({
                 channelId: msg.member.voice.channel.id,
-                guildId: msg.guild.id,
+                guildId: guildId,
                 adapterCreator: msg.guild.voiceAdapterCreator
             });
         }
-        if (queue.length === 1) {
-            playNext(msg, connection, queue);
-        }
+
+        if (queue.length === 1) playNext(msg, connection, queue);
     }
 
     if (command === 'stop') {
         if (connection) connection.destroy();
-        queueMap.set(msg.guild.id, []);
+        queueMap.set(guildId, []);
         msg.reply('⏹️ Music stopped!');
     }
 
@@ -64,99 +87,84 @@ export async function handleMusicCommand(command, msg, args) {
     }
 }
 
-function playNext(msg, connection, queue) {
-    if (!queue.length) return;
-    const song = queue[0];
-    if (!song.url) {
-        msg.channel.send('❌ Error: No valid URL for this song.');
-        queue.shift();
-        queueMap.set(msg.guild.id, queue);
-        if (queue.length) {
-            playNext(msg, connection, queue);
-        } else {
-            connection.destroy();
-        }
+async function findYTDLP() {
+    const possible = [
+        path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
+        path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
+    ];
+
+    for (const p of possible) {
+        if (fs.existsSync(p)) return p;
+    }
+
+    // test global yt-dlp
+    try {
+        await execa('yt-dlp', ['--version']);
+        return 'yt-dlp';
+    } catch {
+        return null;
+    }
+}
+
+async function playNext(msg, connection, queue) {
+    const guildId = msg.guild.id;
+
+    if (!queue.length) {
+        setTimeout(() => connection?.destroy(), 500);
         return;
     }
 
+    const song = queue[0];
     msg.channel.send(`🎵 Now playing: **${song.title}**`);
 
-    // possible yt-dlp executable locations (prefer package binary)
-    const candidatePaths = [
-        path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
-        path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
-        'yt-dlp' // fallback to global in PATH
-    ];
-
-    let ytDlpPath = candidatePaths.find(p => {
-        try {
-            // if it's a simple command like 'yt-dlp', assume it is available (can't fs.existsSync)
-            if (p === 'yt-dlp') return true;
-            return fs.existsSync(p);
-        } catch {
-            return false;
-        }
-    });
-
+    const ytDlpPath = await findYTDLP();
     if (!ytDlpPath) {
-        msg.channel.send('❌ yt-dlp executable not found. Install yt-dlp globally or ensure node_modules contains yt-dlp-exec.');
+        msg.channel.send('❌ yt-dlp not installed. Install yt-dlp or yt-dlp-exec.');
         connection.destroy();
         return;
     }
 
-    // spawn yt-dlp and stream stdout into discord audio resource
-    let ytDlpProcess;
+    let ytProcess;
     try {
-        ytDlpProcess = execa(ytDlpPath, [
+        ytProcess = execa(ytDlpPath, [
             '-f', 'bestaudio',
             '-o', '-',
             song.url
         ], { stdout: 'pipe' });
     } catch (err) {
-        msg.channel.send(`❌ Failed to start yt-dlp: ${err.message}`);
-        // remove problematic song and continue
+        msg.channel.send('❌ Failed to run yt-dlp.');
         queue.shift();
-        queueMap.set(msg.guild.id, queue);
-        if (queue.length) playNext(msg, connection, queue);
-        else connection.destroy();
-        return;
+        queueMap.set(guildId, queue);
+        return playNext(msg, connection, queue);
     }
 
-    const resource = createAudioResource(ytDlpProcess.stdout, { inputType: StreamType.Arbitrary });
-    const player = createAudioPlayer();
-
-    // ensure process is killed if player errors or stops
-    player.on('error', (err) => {
-        console.error('Audio player error:', err);
-        try { ytDlpProcess.kill(); } catch {}
+    const resource = createAudioResource(ytProcess.stdout, {
+        inputType: StreamType.Raw
     });
 
-    ytDlpProcess.on && ytDlpProcess.on('error', (err) => {
-        console.error('yt-dlp process error:', err);
-    });
-
-    // if yt-dlp exits with error, inform channel and skip
-    ytDlpProcess.catch?.((err) => {
-        console.error('yt-dlp failed:', err);
-        msg.channel.send('❌ Error while streaming audio, skipping song.');
-        try { player.stop(); } catch {}
-    });
+    let player = playerMap.get(guildId);
+    if (!player) {
+        player = createAudioPlayer();
+        playerMap.set(guildId, player);
+        connection.subscribe(player);
+    }
 
     player.play(resource);
-    connection.subscribe(player);
 
-    player.on(AudioPlayerStatus.Idle, () => {
-        try { ytDlpProcess.kill(); } catch {}
+    player.once(AudioPlayerStatus.Idle, () => {
+        try { ytProcess.kill(); } catch {}
+
         queue.shift();
-        queueMap.set(msg.guild.id, queue);
-        if (queue.length) {
-            playNext(msg, connection, queue);
-        } else {
-            connection.destroy();
+        queueMap.set(guildId, queue);
+
+        if (queue.length) playNext(msg, connection, queue);
+        else {
+            setTimeout(() => connection.destroy(), 500);
         }
     });
 
-    player.on(AudioPlayerStatus.Playing, () => {
-        // optional: could log or update now-playing message
+    player.on('error', (err) => {
+        console.error(err);
+        try { ytProcess.kill(); } catch {}
     });
 }
