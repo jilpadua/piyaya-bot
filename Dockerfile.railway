@@ -1,5 +1,5 @@
 # Railway-friendly Dockerfile using Railway’s Node 22 base image
-FROM ghcr.io/railwayapp/node:22
+FROM node:22-slim
 
 WORKDIR /app
 
