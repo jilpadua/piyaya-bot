@@ -1,69 +1,65 @@
-import {
-    joinVoiceChannel,
-    createAudioPlayer,
-    createAudioResource,
-    AudioPlayerStatus,
-    getVoiceConnection,
-    StreamType
-} from '@discordjs/voice';
-
-import ytdlp from 'yt-dlp-exec';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, getVoiceConnection, StreamType } from '@discordjs/voice';
 import { execa } from 'execa';
-import path from 'path';
+import ytdlp from 'yt-dlp-exec';
+import fetch from 'node-fetch';
 import fs from 'fs';
+import path from 'path';
 
 const queueMap = new Map();
-const playerMap = new Map();
 
+/* -----------------------------------------
+   🔎 YOUTUBE SEARCH (using YouTube API)
+----------------------------------------- */
+async function searchYouTube(query) {
+    const apiKey = process.env.YT_API_KEY;
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&q=${encodeURIComponent(query)}&key=${apiKey}`;
+
+    const res = await fetch(url);
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    if (!data.items?.length) return null;
+
+    const video = data.items[0];
+    return {
+        title: video.snippet.title,
+        url: `https://www.youtube.com/watch?v=${video.id.videoId}`
+    };
+}
+
+/* -----------------------------------------
+   🔧 MAIN HANDLER
+----------------------------------------- */
 export async function handleMusicCommand(command, msg, args) {
-    const guildId = msg.guild.id;
-
     if (!msg.member.voice.channel) {
-        msg.reply('You must be in a voice channel!');
+        msg.reply("You must be in a voice channel!");
         return;
     }
 
+    const guildId = msg.guild.id;
     let queue = queueMap.get(guildId) || [];
     let connection = getVoiceConnection(guildId);
 
-    if (command === 'play') {
-        const query = args.join(' ');
-        msg.reply(`🔍 Searching for: ${query}`);
+    /* ---------- PLAY ---------- */
+    if (command === "play") {
+        const query = args.join(" ");
+        msg.reply(`🔍 Searching YouTube: **${query}**`);
 
-        let info;
-        try {
-            info = await ytdlp(`ytsearch1:${query}`, {
-                dumpSingleJson: true,
-                noCheckCertificate: true
-            });
-        } catch {
-            msg.reply('No results found!');
+        const result = await searchYouTube(query);
+        if (!result) {
+            msg.reply("❌ No results found!");
             return;
         }
 
-        const entry = info.entries?.[0];
-        if (!entry) {
-            msg.reply('No results found!');
-            return;
-        }
-
-        const url = entry.url || entry.webpage_url;
-        if (!url) {
-            msg.reply('Invalid video.');
-            return;
-        }
-
-        const song = { title: entry.title, url };
-
-        queue.push(song);
+        queue.push(result);
         queueMap.set(guildId, queue);
 
-        msg.reply(`✅ Added to queue: **${song.title}**`);
+        msg.reply(`✅ Added to queue: **${result.title}**`);
 
         if (!connection) {
             connection = joinVoiceChannel({
                 channelId: msg.member.voice.channel.id,
-                guildId: guildId,
+                guildId,
                 adapterCreator: msg.guild.voiceAdapterCreator
             });
         }
@@ -71,100 +67,62 @@ export async function handleMusicCommand(command, msg, args) {
         if (queue.length === 1) playNext(msg, connection, queue);
     }
 
-    if (command === 'stop') {
+    /* ---------- STOP ---------- */
+    if (command === "stop") {
         if (connection) connection.destroy();
         queueMap.set(guildId, []);
-        msg.reply('⏹️ Music stopped!');
+        msg.reply("⏹️ Music stopped!");
     }
 
-    if (command === 'queue') {
-        if (!queue.length) {
-            msg.reply('Queue is empty!');
-            return;
-        }
-        const list = queue.map((s, i) => `${i + 1}. ${s.title}`).join('\n');
-        msg.reply(`**Queue:**\n${list}`);
-    }
-}
+    /* ---------- QUEUE ---------- */
+    if (command === "queue") {
+        if (!queue.length) return msg.reply("Queue is empty!");
 
-async function findYTDLP() {
-    const possible = [
-        path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
-        path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
-    ];
-
-    for (const p of possible) {
-        if (fs.existsSync(p)) return p;
-    }
-
-    // test global yt-dlp
-    try {
-        await execa('yt-dlp', ['--version']);
-        return 'yt-dlp';
-    } catch {
-        return null;
+        const out = queue.map((s, i) => `${i + 1}. ${s.title}`).join("\n");
+        msg.reply(`🎶 **Queue:**\n${out}`);
     }
 }
 
-async function playNext(msg, connection, queue) {
-    const guildId = msg.guild.id;
-
-    if (!queue.length) {
-        setTimeout(() => connection?.destroy(), 500);
-        return;
-    }
+/* -----------------------------------------
+   ▶️ PLAY NEXT SONG
+----------------------------------------- */
+function playNext(msg, connection, queue) {
+    if (!queue.length) return;
 
     const song = queue[0];
     msg.channel.send(`🎵 Now playing: **${song.title}**`);
 
-    const ytDlpPath = await findYTDLP();
-    if (!ytDlpPath) {
-        msg.channel.send('❌ yt-dlp not installed. Install yt-dlp or yt-dlp-exec.');
-        connection.destroy();
-        return;
-    }
+    const candidatePaths = [
+        path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+        path.join(process.cwd(), "node_modules", ".bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+        "yt-dlp"
+    ];
 
-    let ytProcess;
-    try {
-        ytProcess = execa(ytDlpPath, [
-            '-f', 'bestaudio',
-            '-o', '-',
-            song.url
-        ], { stdout: 'pipe' });
-    } catch (err) {
-        msg.channel.send('❌ Failed to run yt-dlp.');
-        queue.shift();
-        queueMap.set(guildId, queue);
-        return playNext(msg, connection, queue);
-    }
+    let ytDlpPath = candidatePaths.find(p => p === "yt-dlp" || fs.existsSync(p));
 
-    const resource = createAudioResource(ytProcess.stdout, {
-        inputType: StreamType.Raw
-    });
+    const ytProcess = execa(ytDlpPath, [
+        "-f", "bestaudio",
+        "-o", "-",
+        song.url
+    ], { stdout: "pipe" });
 
-    let player = playerMap.get(guildId);
-    if (!player) {
-        player = createAudioPlayer();
-        playerMap.set(guildId, player);
-        connection.subscribe(player);
-    }
+    const resource = createAudioResource(ytProcess.stdout, { inputType: StreamType.Arbitrary });
+    const player = createAudioPlayer();
 
     player.play(resource);
+    connection.subscribe(player);
 
-    player.once(AudioPlayerStatus.Idle, () => {
+    player.on(AudioPlayerStatus.Idle, () => {
         try { ytProcess.kill(); } catch {}
-
         queue.shift();
-        queueMap.set(guildId, queue);
+        queueMap.set(msg.guild.id, queue);
 
         if (queue.length) playNext(msg, connection, queue);
-        else {
-            setTimeout(() => connection.destroy(), 500);
-        }
+        else connection.destroy();
     });
 
-    player.on('error', (err) => {
-        console.error(err);
+    player.on("error", err => {
+        console.error("Audio error:", err);
         try { ytProcess.kill(); } catch {}
     });
 }
