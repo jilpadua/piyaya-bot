@@ -55,6 +55,7 @@ export async function handleMusicCommand(command, msg, args) {
     }
 
     const cookiesPath = process.env.YT_COOKIES_PATH;
+    console.log("YT_COOKIE_PATH:", cookiesPath, "Exists:", fs.existsSync(cookiesPath));
     const searchArgs = [
       `ytsearch1:${query}`,
       "--dump-single-json",
