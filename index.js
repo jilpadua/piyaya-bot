@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import dotenv from 'dotenv';
+import "./server.js";
 import path from 'path';
 import fs from 'fs';
 

@@ -5,199 +5,173 @@ import {
   AudioPlayerStatus,
   getVoiceConnection,
   StreamType
-} from '@discordjs/voice';
+} from "@discordjs/voice";
 
-import { execa } from 'execa';
-import path from 'path';
-import fs from 'fs';
-import fetch from 'node-fetch';
+import { execa } from "execa";
+import path from "path";
+import fs from "fs";
+import fetch from "node-fetch";
 
 const queueMap = new Map();
 
-/**
- * Search YouTube for a query using the YouTube Data API (v3).
- * Returns { title, url } or null if nothing found.
- */
+/* ---------------------------------------------------------
+   YOUTUBE SEARCH (YouTube Data API)
+--------------------------------------------------------- */
 async function youtubeSearch(query) {
   const apiKey = process.env.YT_API_KEY;
-  if (!apiKey) throw new Error('Missing YT_API_KEY environment variable.');
+  if (!apiKey) throw new Error("Missing YT_API_KEY env variable.");
 
-  const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&q=${encodeURIComponent(
-    query
-  )}&key=${apiKey}`;
+  const url =
+    "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&q=" +
+    encodeURIComponent(query) +
+    "&key=" +
+    apiKey;
 
   const res = await fetch(url);
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`YouTube API error ${res.status}: ${txt}`);
+    throw new Error("YouTube API error: " + txt);
   }
 
   const data = await res.json();
-  if (!data.items || data.items.length === 0) return null;
+  if (!data.items || !data.items.length) return null;
 
   const vid = data.items[0].id.videoId;
   const title = data.items[0].snippet.title;
+
   return { title, url: `https://www.youtube.com/watch?v=${vid}` };
 }
 
-/**
- * Main exported handler. Call from your message handler:
- * await handleMusicCommand(command, msg, args)
- */
+/* ---------------------------------------------------------
+   MAIN HANDLER
+--------------------------------------------------------- */
 export async function handleMusicCommand(command, msg, args) {
-  if (!msg.guild) return; // only guilds
+  if (!msg.guild) return;
+
   const guildId = msg.guild.id;
 
-  // require the user to be in a voice channel for play/stop
-  if (['play', 'stop', 'queue'].includes(command) && !msg.member?.voice?.channel) {
-    await msg.reply('You must be in a voice channel!');
+  if (["play", "stop", "queue"].includes(command) && !msg.member.voice?.channel) {
+    await msg.reply("You must be in a voice channel!");
     return;
   }
 
   let queue = queueMap.get(guildId) || [];
   let connection = getVoiceConnection(guildId);
 
-  // PLAY
-  if (command === 'play') {
-    const query = args.join(' ').trim();
-    if (!query) {
-      await msg.reply('❌ Please provide a search term or URL.');
-      return;
-    }
+  /* PLAY */
+  if (command === "play") {
+    const query = args.join(" ").trim();
+    if (!query) return msg.reply("❌ Provide a search term or URL.");
 
-    await msg.reply(`🔍 Searching YouTube: ${query}`);
+    await msg.reply(`🔍 Searching: ${query}`);
 
     let song;
+
     try {
-      // If the user provided a direct YouTube URL, prefer it (basic check)
       const isUrl = /^https?:\/\//i.test(query);
       if (isUrl) {
-        // We don't fetch metadata for a direct url here — yt-dlp later will stream it.
-        // But try to get a title via YouTube Data API if it's a youtube watch link.
         const urlObj = new URL(query);
-        const v = urlObj.searchParams.get('v');
-        if (v) {
-          song = { title: `YouTube: ${v}`, url: `https://www.youtube.com/watch?v=${v}` };
-          // Optionally: call YouTube API to get real title; omitted for speed.
-        } else {
-          song = { title: query, url: query };
-        }
+        const v = urlObj.searchParams.get("v");
+        song = v
+          ? { title: "YouTube Video", url: `https://www.youtube.com/watch?v=${v}` }
+          : { title: query, url: query };
       } else {
         song = await youtubeSearch(query);
       }
     } catch (err) {
-      console.error('YouTube search failed:', err);
-      await msg.reply('❌ Error searching YouTube. Try again later.');
-      return;
+      console.error(err);
+      return msg.reply("❌ Error searching YouTube.");
     }
 
-    if (!song) {
-      await msg.reply('❌ No results found.');
-      return;
-    }
+    if (!song) return msg.reply("❌ No results found.");
 
     queue.push(song);
     queueMap.set(guildId, queue);
+
     await msg.reply(`✅ Added to queue: **${song.title}**`);
 
     if (!connection) {
       connection = joinVoiceChannel({
         channelId: msg.member.voice.channel.id,
         guildId,
-        adapterCreator: msg.guild.voiceAdapterCreator
+        adapterCreator: msg.guild.voiceAdapterCreator,
       });
     }
 
-    // If this is the only song, start playing
-    if (queue.length === 1) {
-      playNext(msg, connection, queue);
-    }
+    if (queue.length === 1) playNext(msg, connection, queue);
     return;
   }
 
-  // STOP
-  if (command === 'stop') {
-    if (connection) connection.destroy();
+  /* STOP */
+  if (command === "stop") {
+    connection?.destroy();
     queueMap.set(guildId, []);
-    await msg.reply('⏹️ Music stopped and queue cleared.');
-    return;
+    return msg.reply("⏹️ Stopped.");
   }
 
-  // QUEUE
-  if (command === 'queue') {
-    queue = queueMap.get(guildId) || [];
-    if (!queue.length) {
-      await msg.reply('Queue is empty!');
-      return;
-    }
-    const list = queue.map((s, i) => `${i + 1}. ${s.title}`).join('\n');
-    await msg.reply(`**Queue:**\n${list}`);
-    return;
+  /* QUEUE */
+  if (command === "queue") {
+    if (!queue.length) return msg.reply("Queue is empty!");
+    const list = queue.map((s, i) => `${i + 1}. ${s.title}`).join("\n");
+    return msg.reply("**Queue:**\n" + list);
   }
 }
 
-/**
- * Play the next song in the queue for the guild.
- * This function subscribes an AudioPlayer to the existing connection.
- */
+/* ---------------------------------------------------------
+   PLAY NEXT SONG
+--------------------------------------------------------- */
 function playNext(msg, connection, queue) {
   if (!queue.length) return;
   const song = queue[0];
-  if (!song || !song.url) {
-    msg.channel.send('❌ Error: no valid URL for the next song.');
-    queue.shift();
-    queueMap.set(msg.guild.id, queue);
-    if (queue.length) playNext(msg, connection, queue);
-    else connection.destroy();
-    return;
-  }
 
   msg.channel.send(`🎵 Now playing: **${song.title}**`);
 
-  // candidate paths for yt-dlp binary (prefer package-provided binary)
-  const candidatePaths = [
-    path.join(process.cwd(), 'node_modules', 'yt-dlp-exec', 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
-    path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'),
-    'yt-dlp'
+  /* ---- Load Cookies ---- */
+  const cookieEnv = process.env.YT_COOKIES_PATH || "/app/cookies.txt";
+  const hasCookies = fs.existsSync(cookieEnv);
+
+  const cookieArgs = hasCookies ? ["--cookies", cookieEnv] : [];
+
+  if (hasCookies) {
+    console.log("Using cookies.txt:", cookieEnv);
+  } else {
+    console.log("No cookies file detected.");
+  }
+
+  /* ---- Find yt-dlp ---- */
+  const possible = [
+    path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+    path.join(process.cwd(), "node_modules", ".bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+    "yt-dlp",
   ];
 
-  const ytDlpPath = candidatePaths.find(p => {
-    try {
-      if (p === 'yt-dlp') return true; // assume global installed if in PATH
-      return fs.existsSync(p);
-    } catch {
-      return false;
-    }
-  });
-
+  const ytDlpPath = possible.find((p) => p === "yt-dlp" || fs.existsSync(p));
   if (!ytDlpPath) {
-    msg.channel.send('❌ yt-dlp not found. Please install yt-dlp or include yt-dlp-exec in node_modules.');
+    msg.channel.send("❌ yt-dlp not found.");
     connection.destroy();
     return;
   }
 
-  // spawn yt-dlp to stream best audio to stdout
+  /* ---- Spawn yt-dlp ---- */
   let proc;
   try {
     proc = execa(
       ytDlpPath,
       [
-        '-f',
-        'bestaudio',
-        '-o',
-        '-',
-        '--no-warnings',
-        '--no-call-home',
-        // suggest a player_client to reduce JS runtime extraction issues
-        '--extractor-args',
-        'youtube:player_client=default',
-        song.url
+        "-f",
+        "bestaudio",
+        "-o",
+        "-",
+        "--no-warnings",
+        "--extractor-args",
+        "youtube:player_client=default",
+        ...cookieArgs,
+        song.url,
       ],
-      { stdout: 'pipe' }
+      { stdout: "pipe" }
     );
   } catch (err) {
-    console.error('yt-dlp spawn error:', err);
-    // skip this song and continue
+    console.error("yt-dlp spawn error:", err);
     queue.shift();
     queueMap.set(msg.guild.id, queue);
     if (queue.length) playNext(msg, connection, queue);
@@ -205,40 +179,34 @@ function playNext(msg, connection, queue) {
     return;
   }
 
-  // create audio resource and player
+  /* ---- Create audio resource ---- */
   const resource = createAudioResource(proc.stdout, { inputType: StreamType.Arbitrary });
   const player = createAudioPlayer();
-
-  // propagate errors & ensure process cleanup
-  player.on('error', (err) => {
-    console.error('Audio player error:', err);
-    try {
-      proc.kill();
-    } catch {}
-  });
-
-  proc.on && proc.on('error', (err) => {
-    console.error('yt-dlp process error:', err);
-  });
-
-  // If the yt-dlp process rejects (execa), handle that case
-  proc.catch?.((err) => {
-    console.error('yt-dlp failed:', err);
-    try { player.stop(); } catch {}
-    msg.channel.send('❌ Error while streaming audio, skipping song.');
-  });
 
   player.play(resource);
   connection.subscribe(player);
 
   player.on(AudioPlayerStatus.Idle, () => {
-    try { proc.kill(); } catch {}
+    try {
+      proc.kill();
+    } catch {}
     queue.shift();
     queueMap.set(msg.guild.id, queue);
-    if (queue.length) {
-      playNext(msg, connection, queue);
-    } else {
-      try { connection.destroy(); } catch {}
-    }
+    queue.length ? playNext(msg, connection, queue) : connection.destroy();
+  });
+
+  player.on("error", (err) => {
+    console.error("Audio error:", err);
+    try {
+      proc.kill();
+    } catch {}
+  });
+
+  proc.catch?.((err) => {
+    console.error("yt-dlp failed:", err);
+    msg.channel.send("❌ yt-dlp failed. Skipping.");
+    try {
+      player.stop();
+    } catch {}
   });
 }
