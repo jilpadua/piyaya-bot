@@ -1,22 +1,20 @@
-# Use official Node 18 base image
-FROM node:18
+FROM node:22-slim
 
-# Install python (required for yt-dlp-exec)
+# Install required system deps for voice & opus
 RUN apt-get update && \
-    apt-get install -y python3 && \
-    ln -s /usr/bin/python3 /usr/bin/python
+    apt-get install -y python3 ffmpeg libsodium23 build-essential && \
+    ln -s /usr/bin/python3 /usr/bin/python && \
+    rm -rf /var/lib/apt/lists/*
 
-# Create working directory
 WORKDIR /app
 
-# Copy package.json + lock file first (better caching)
+# Copy only package files first
 COPY package*.json ./
 
 # Install dependencies
 RUN npm ci
 
-# Copy the rest of your bot files
+# Copy rest of the project
 COPY . .
 
-# Expose nothing (discord bots don't listen on a port)
-CMD ["npm", "start"]
+CMD [ "npm", "start" ]
