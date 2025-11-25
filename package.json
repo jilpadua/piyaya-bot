@@ -7,7 +7,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node index.js",
+    "start": "node server.js & node index.js",
     "dev": "nodemon index.js",
     "type": "module"
   },
