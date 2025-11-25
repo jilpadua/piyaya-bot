@@ -1,36 +1,55 @@
-import { Client, GatewayIntentBits } from 'discord.js';
-import { handleMusicCommand } from './music.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+
 
 dotenv.config();
 
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-    console.error('Discord bot token is missing! Please set DISCORD_TOKEN in your .env file.');
-    process.exit(1);
-}
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds, 
-    GatewayIntentBits.GuildMessages, 
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates
-  ]
+intents: [
+GatewayIntentBits.Guilds,
+GatewayIntentBits.GuildVoiceStates,
+GatewayIntentBits.GuildMessages,
+GatewayIntentBits.MessageContent
+],
+partials: [Partials.Channel]
 });
 
-client.on('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
+
+import { handleMusicCommand } from './commands/music.js';
+
+
+client.once('clientReady', () => {
+console.log('Logged in as', client.user.tag);
 });
+
 
 client.on('messageCreate', async (msg) => {
-  if (!msg.content.startsWith('!')) return;
-  const args = msg.content.slice(1).split(' ');
-  const command = args.shift().toLowerCase();
+if (msg.author.bot) return;
+if (!msg.guild) return;
 
-  if (['play', 'stop', 'queue'].includes(command)) {
-    await handleMusicCommand(command, msg, args);
-  }
+
+const prefix = '!';
+if (!msg.content.startsWith(prefix)) return;
+
+
+const [cmd, ...args] = msg.content.slice(prefix.length).trim().split(/\s+/);
+const command = cmd.toLowerCase();
+
+
+if (['play','stop','queue'].includes(command)) {
+try {
+await handleMusicCommand(command, msg, args);
+} catch (err) {
+console.error('Music command error:', err);
+msg.reply('⚠️ Internal error while handling music command.');
+}
+}
 });
 
-client.login(process.env.DISCORD_TOKEN);
+
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+console.error('Failed to login:', err);
+});
