@@ -25,7 +25,7 @@ function findYtdlpBinary() {
 
   return candidatePaths.find((p) => {
     try {
-      if (p === "yt-dlp") return true;
+      if (p === "yt-dlp") return true; // rely on PATH if installed globally
       return fs.existsSync(p);
     } catch {
       return false;
@@ -55,22 +55,24 @@ export async function handleMusicCommand(command, msg, args) {
     }
 
     const cookiesPath = process.env.YT_COOKIES_PATH;
-    console.log("YT_COOKIE_PATH:", cookiesPath, "Exists:", fs.existsSync(cookiesPath));
     const searchArgs = [
       `ytsearch1:${query}`,
       "--dump-single-json",
       "--no-check-certificate",
+      "--no-warnings",
       "--extractor-args",
-      "youtube:player_client=default"
+      "youtube:player_client=android"
     ];
 
+    // Only add cookies if file exists
     if (cookiesPath && fs.existsSync(cookiesPath)) {
       searchArgs.push("--cookies", cookiesPath);
     }
 
     let info;
     try {
-      const { stdout } = await execa(ytdlpPath, searchArgs);
+      // execa will return a child-process-like object; stdout is a string here
+      const { stdout } = await execa(ytdlpPath, searchArgs, { stderr: "inherit" });
       info = JSON.parse(stdout);
     } catch (err) {
       console.error("YTDLP SEARCH ERROR:", err?.stderr || err);
@@ -103,7 +105,7 @@ export async function handleMusicCommand(command, msg, args) {
         adapterCreator: msg.guild.voiceAdapterCreator
       });
 
-      // *** ENABLE AUTO-RECONNECT ***
+      // Enable auto-reconnect
       attachVoiceReconnection(connection);
     }
 
@@ -142,23 +144,30 @@ function playNext(msg, connection, queue) {
 
   const cookiesPath = process.env.YT_COOKIES_PATH;
 
+  // Build robust yt-dlp args for streaming to stdout
   const args = [
-    "-f",
-    "bestaudio",
-    "-o",
-    "-",
-    "--extractor-args",
-    "youtube:player_client=default",
+    // prefer m4a (good container for piping); fallback to bestaudio
+    "-f", "bestaudio[ext=m4a]/bestaudio",
+    "--no-check-certificate",
+    "--no-warnings",
+    "--prefer-free-formats",
+    "--no-playlist",
+    "--extract-audio", // ensure audio extraction
+    "-o", "-",         // stream to stdout
     song.url
   ];
 
+  // If cookies are present, place them before other args (safe)
   if (cookiesPath && fs.existsSync(cookiesPath)) {
+    // Put cookies at the front so they are respected by extractors
     args.unshift("--cookies", cookiesPath);
   }
 
   let proc;
   try {
-    proc = execa(ytdlpPath, args, { stdout: "pipe" });
+    // stdout: "pipe" gives us a stream we can pass to createAudioResource
+    // stderr: "inherit" makes yt-dlp errors visible in the host logs (useful on Railway)
+    proc = execa(ytdlpPath, args, { stdout: "pipe", stderr: "inherit" });
   } catch (err) {
     console.error("yt-dlp launch failed:", err);
     queue.shift();
@@ -168,6 +177,19 @@ function playNext(msg, connection, queue) {
     return;
   }
 
+  // if proc.stdout is not present (unexpected), fail gracefully
+  if (!proc.stdout) {
+    console.error("yt-dlp did not provide stdout stream.");
+    msg.channel.send("⚠️ Error streaming audio. Skipping…");
+    try { proc.kill(); } catch {}
+    queue.shift();
+    queueMap.set(msg.guild.id, queue);
+    if (queue.length) playNext(msg, connection, queue);
+    else connection.destroy();
+    return;
+  }
+
+  // Create resource from stdout stream
   const resource = createAudioResource(proc.stdout, {
     inputType: StreamType.Arbitrary
   });
@@ -201,6 +223,7 @@ function playNext(msg, connection, queue) {
     else connection.destroy();
   });
 
+  // catch promise rejection from execa (if it resolves as a promise with non-zero code)
   proc.catch?.((err) => {
     console.error("yt-dlp stream error:", err);
     msg.channel.send("⚠️ Error streaming audio. Skipping…");
